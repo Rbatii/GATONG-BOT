@@ -1,6 +1,7 @@
 import os
 import re
 import base64
+import time
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -47,6 +48,7 @@ def kakao_simple_text(text: str) -> dict:
 
 
 def extract_first_url(value) -> str | None:
+    """secureimage 값이 dict/list/문자열(List(...))로 와도 URL 1개만 뽑기"""
     if value is None:
         return None
 
@@ -82,36 +84,54 @@ def guess_mime(image_bytes: bytes) -> str:
         return "image/png"
     if image_bytes.startswith(b"\xff\xd8\xff"):
         return "image/jpeg"
-    return "image/jpeg"  # 대부분 jpg라 기본값은 jpeg로
+    return "image/jpeg"
+
+
+@app.get("/")
+async def health():
+    # 서버 살아있는지 브라우저에서 확인용
+    return {"status": "alive", "version": "v5-timing"}
 
 
 @app.post("/kakao-skill")
 async def kakao_skill(req: Request):
+    t_total = time.time()
     body = await req.json()
-    print("🔥 KAKAO REQUEST RECEIVED (v5)")
+    print("🔥 KAKAO REQUEST RECEIVED (v5-timing)")
 
+    # API 키 확인
     if not os.environ.get("OPENAI_API_KEY"):
-        return JSONResponse(kakao_simple_text("v5) OPENAI_API_KEY가 설정되지 않았어요. Render 환경변수에 추가해주세요."))
+        return JSONResponse(
+            kakao_simple_text("v5) OPENAI_API_KEY가 설정되지 않았어요. Render 환경변수에 추가해주세요.")
+        )
 
+    # 이미지 URL 추출
     detail = body.get("action", {}).get("detailParams", {})
     secureimage_raw = detail.get("secureimage", {}).get("value", {})
     image_url = extract_first_url(secureimage_raw)
 
     if not image_url:
-        return JSONResponse(kakao_simple_text("v5) 사진이 안 들어왔어요.\n가정통신문 사진을 1장 보내주세요 🙂"))
+        return JSONResponse(
+            kakao_simple_text("v5) 사진이 안 들어왔어요.\n가정통신문 사진을 1장 보내주세요 🙂")
+        )
 
-    # 1) 이미지 다운로드
+    # 1) 이미지 다운로드 + 시간 측정
     try:
+        t_dl = time.time()
         image_bytes = await download_image_bytes(image_url)
+        print(f"⏱️ download sec = {time.time() - t_dl:.3f} (bytes={len(image_bytes)})")
     except Exception as e:
         print("❌ image download error:", repr(e))
-        return JSONResponse(kakao_simple_text("v5) 사진을 불러오지 못했어요. 사진을 다시 보내주시거나, 조금 후에 다시 시도해주세요."))
+        return JSONResponse(
+            kakao_simple_text("v5) 사진을 불러오지 못했어요. 사진을 다시 보내주시거나, 조금 후에 다시 시도해주세요.")
+        )
 
     mime = guess_mime(image_bytes)
     data_url = f"data:{mime};base64," + base64.b64encode(image_bytes).decode("utf-8")
 
-    # 2) OpenAI 호출 (✅ responses 대신 chat.completions 사용)
+    # 2) OpenAI 호출 + 시간 측정
     try:
+        t_ai = time.time()
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
@@ -124,14 +144,18 @@ async def kakao_skill(req: Request):
                 }
             ],
         )
+        print(f"⏱️ openai sec = {time.time() - t_ai:.3f}")
+
         summary = (resp.choices[0].message.content or "").strip()
         if not summary:
             summary = "v5) 요약 결과가 비어있어요. 사진을 조금 더 선명하게 찍어 다시 보내주세요 🙂"
+
     except Exception as e:
         err = repr(e)
         print("❌ openai error:", err)
-        # 에러 힌트가 필요하면 아래처럼 짧게 보여줄 수도 있음:
-        # return JSONResponse(kakao_simple_text("v5) 요약 오류: " + err[:180]))
-        return JSONResponse(kakao_simple_text("v5) 요약 중 오류가 발생했어요. 잠시 후 다시 시도해주세요."))
+        return JSONResponse(
+            kakao_simple_text("v5) 요약 중 오류가 발생했어요. 잠시 후 다시 시도해주세요.")
+        )
 
+    print(f"⏱️ total sec = {time.time() - t_total:.3f}")
     return JSONResponse(kakao_simple_text(summary))
