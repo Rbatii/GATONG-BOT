@@ -23,16 +23,18 @@ async def kakao_skill(req: Request):
     detail = body.get("action", {}).get("detailParams", {})
     secureimage_value = detail.get("secureimage", {}).get("value", {})
 
+    # secureUrls는 리스트(여러 장 가능)
     secure_urls = secureimage_value.get("secureUrls", [])
 
     if not secure_urls:
-        return JSONResponse(kakao_simple_text(
-            "사진이 안 들어왔어요.\n가정통신문 사진을 1장 보내주세요 🙂"
-        ))
+        text = "사진이 안 들어왔어요.\n가정통신문 사진을 1장 보내주세요 🙂"
+    else:
+        # ✅ 첫 번째 URL만 사용 (List(...) 문제 방지)
+        image_url = secure_urls[0]
+        text = (
+            "✅ 사진 수신 완료!\n"
+            "(지금은 URL 확인 단계)\n\n"
+            f"- image_url: {image_url}"
+        )
 
-    # 여기까지 왔다는 건 사진 URL을 정상 수신한 것
-    image_url = secure_urls[0]
-    return JSONResponse(kakao_simple_text(
-        "✅ 사진 수신 완료!\n(다음 단계에서 요약을 붙일게요)\n\n"
-        f"- image_url: {image_url}"
-    ))
+    return JSONResponse(kakao_simple_text(text))
