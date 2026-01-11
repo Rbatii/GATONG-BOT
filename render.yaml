@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: notice-bot
+    name: GATONG-BOT
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
