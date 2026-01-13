@@ -46,8 +46,16 @@ def kakao_simple_text(text: str) -> dict:
     }
 
 
+def kakao_use_callback() -> dict:
+    # 콜백 모드로 동작하려면 useCallback=true 를 반환해야 함 (template 사용 X)
+    # (카카오 가이드 명시) :contentReference[oaicite:3]{index=3}
+    return {
+        "version": "2.0",
+        "useCallback": True
+    }
+
+
 def extract_first_url(value) -> str | None:
-    """secureimage 값이 dict/list/문자열(List(...))로 와도 URL 1개만 뽑기"""
     if value is None:
         return None
 
@@ -86,17 +94,26 @@ def guess_mime(image_bytes: bytes) -> str:
     return "image/jpeg"
 
 
-async def post_callback(callback_url: str, text: str) -> None:
-    """카카오 callbackUrl로 최종 응답을 보내는 함수(1회용)"""
+async def post_callback(callback_url: str, callback_token: str | None, text: str) -> None:
+    """
+    callbackUrl로 최종 응답 전송.
+    콜백 토큰 헤더(x-kakao-callback-token)가 오는 환경에서는 같이 넣어주는 게 안전함.
+    (테스트 환경에서 토큰 이슈가 있다는 안내도 있음) :contentReference[oaicite:4]{index=4}
+    """
     payload = kakao_simple_text(text)
+    headers = {}
+    if callback_token:
+        headers["x-kakao-callback-token"] = callback_token
+
     timeout = httpx.Timeout(20.0)
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
-        r = await c.post(callback_url, json=payload)
+        r = await c.post(callback_url, json=payload, headers=headers)
         print("📮 callback status:", r.status_code)
+        if r.status_code >= 400:
+            print("📮 callback body:", r.text[:500])
 
 
-async def run_summary_and_callback(image_url: str, callback_url: str) -> None:
-    """느린 작업(다운로드+OpenAI) 후 callbackUrl로 결과 전송"""
+async def run_summary_and_callback(image_url: str, callback_url: str, callback_token: str | None) -> None:
     try:
         image_bytes = await download_image_bytes(image_url)
         mime = guess_mime(image_bytes)
@@ -119,38 +136,39 @@ async def run_summary_and_callback(image_url: str, callback_url: str) -> None:
         if not summary:
             summary = "요약 결과가 비어있어요. 사진을 조금 더 선명하게 찍어 다시 보내주세요 🙂"
 
-        await post_callback(callback_url, summary)
+        await post_callback(callback_url, callback_token, summary)
 
     except Exception as e:
         err = repr(e)
         print("❌ async summary error:", err)
         await post_callback(
             callback_url,
+            callback_token,
             "요약 중 오류가 발생했어요. 사진을 다시 보내주시거나 잠시 후 다시 시도해주세요."
         )
 
 
 @app.get("/")
 async def health():
-    return {"status": "alive", "version": "v6-callback-debug"}
+    return {"status": "alive", "version": "v7-callback-fixed"}
 
 
 @app.post("/kakao-skill")
 async def kakao_skill(req: Request):
     body = await req.json()
-    print("🔥 KAKAO REQUEST RECEIVED (v6-callback-debug)")
-
-    # ✅ callbackUrl이 진짜 내려오는지 확인용 로그 (핵심)
-    print("callbackUrl=", body.get("callbackUrl"))
-    print("keys=", list(body.keys()))
+    print("🔥 KAKAO REQUEST RECEIVED (v7)")
 
     if not os.environ.get("OPENAI_API_KEY"):
-        return JSONResponse(
-            kakao_simple_text("OPENAI_API_KEY가 설정되지 않았어요. Render 환경변수에 추가해주세요.")
-        )
+        return JSONResponse(kakao_simple_text("OPENAI_API_KEY가 설정되지 않았어요. Render 환경변수에 추가해주세요."))
 
-    # callbackUrl: 카카오가 요청마다 1회용으로 발급해줌 (최대 1분)
-    callback_url = body.get("callbackUrl") or body.get("callback_url")
+    # ✅ callbackUrl은 userRequest 안에 들어감 :contentReference[oaicite:5]{index=5}
+    user_request = body.get("userRequest", {})
+    callback_url = user_request.get("callbackUrl")
+
+    # 콜백 토큰 (있을 수도/없을 수도)
+    callback_token = req.headers.get("x-kakao-callback-token")
+    print("callbackUrl=", callback_url)
+    print("callbackTokenPresent=", bool(callback_token))
 
     # 이미지 URL 추출
     detail = body.get("action", {}).get("detailParams", {})
@@ -160,18 +178,14 @@ async def kakao_skill(req: Request):
     if not image_url:
         return JSONResponse(kakao_simple_text("사진이 안 들어왔어요.\n가정통신문 사진을 1장 보내주세요 🙂"))
 
-    # ✅ 콜백이 없다면: 일단 즉시 응답만(디버그용)
-    # (콜백이 진짜 켜지면 여기로 오지 않아야 정상)
+    # callbackUrl이 없으면 아직 콜백이 적용되지 않은 요청(또는 테스트 한계)일 수 있음
     if not callback_url:
         return JSONResponse(kakao_simple_text(
-            "callbackUrl이 아직 내려오지 않았어요.\n"
-            "오픈빌더에서 '콜백 설정'을 '가정통신문 요약' 블록에 켠 뒤 저장+운영배포까지 해주세요."
+            "callbackUrl이 요청에 포함되지 않았어요.\n"
+            "1) 운영 채널에서 테스트 중인지 확인\n"
+            "2) '가정통신문 요약' 블록에 콜백 설정 ON + 운영 배포 확인"
         ))
 
-    # ✅ 1차 즉시 응답(5초 내) — 타임아웃 방지
-    immediate = "사진 확인했어요 🙂\n요약 중입니다... (10~20초 정도 걸릴 수 있어요)"
-
-    # ✅ 백그라운드처럼 요약 후 콜백 전송
-    asyncio.create_task(run_summary_and_callback(image_url, callback_url))
-
-    return JSONResponse(kakao_simple_text(immediate))
+    # ✅ 5초 내에 useCallback=true로 응답해야 콜백 모드로 동작 :contentReference[oaicite:6]{index=6}
+    asyncio.create_task(run_summary_and_callback(image_url, callback_url, callback_token))
+    return JSONResponse(kakao_use_callback())
