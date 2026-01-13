@@ -1,6 +1,7 @@
 import os
 import re
 import base64
+import asyncio
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -46,6 +47,7 @@ def kakao_simple_text(text: str) -> dict:
 
 
 def extract_first_url(value) -> str | None:
+    """secureimage 값이 dict/list/문자열(List(...))로 와도 URL 1개만 뽑기"""
     if value is None:
         return None
 
@@ -85,22 +87,16 @@ def guess_mime(image_bytes: bytes) -> str:
 
 
 async def post_callback(callback_url: str, text: str) -> None:
-    """
-    카카오 callbackUrl로 최종 응답을 보내는 함수
-    """
+    """카카오 callbackUrl로 최종 응답을 보내는 함수(1회용)"""
     payload = kakao_simple_text(text)
     timeout = httpx.Timeout(20.0)
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
         r = await c.post(callback_url, json=payload)
-        # 콜백 실패해도 서버가 죽으면 안 되니 raise는 안 함
         print("📮 callback status:", r.status_code)
 
 
 async def run_summary_and_callback(image_url: str, callback_url: str) -> None:
-    """
-    시간이 오래 걸리는 작업(다운로드+OpenAI)을 백그라운드처럼 수행한 뒤
-    callbackUrl로 결과를 전송한다.
-    """
+    """느린 작업(다운로드+OpenAI) 후 callbackUrl로 결과 전송"""
     try:
         image_bytes = await download_image_bytes(image_url)
         mime = guess_mime(image_bytes)
@@ -136,25 +132,25 @@ async def run_summary_and_callback(image_url: str, callback_url: str) -> None:
 
 @app.get("/")
 async def health():
-    return {"status": "alive", "version": "v6-callback"}
+    return {"status": "alive", "version": "v6-callback-debug"}
 
 
 @app.post("/kakao-skill")
 async def kakao_skill(req: Request):
     body = await req.json()
-    print("🔥 KAKAO REQUEST RECEIVED (v6-callback)")
+    print("🔥 KAKAO REQUEST RECEIVED (v6-callback-debug)")
+
+    # ✅ callbackUrl이 진짜 내려오는지 확인용 로그 (핵심)
+    print("callbackUrl=", body.get("callbackUrl"))
+    print("keys=", list(body.keys()))
 
     if not os.environ.get("OPENAI_API_KEY"):
-        return JSONResponse(kakao_simple_text("OPENAI_API_KEY가 설정되지 않았어요. Render 환경변수에 추가해주세요."))
+        return JSONResponse(
+            kakao_simple_text("OPENAI_API_KEY가 설정되지 않았어요. Render 환경변수에 추가해주세요.")
+        )
 
-    # callbackUrl (카카오가 제공)
+    # callbackUrl: 카카오가 요청마다 1회용으로 발급해줌 (최대 1분)
     callback_url = body.get("callbackUrl") or body.get("callback_url")
-    if not callback_url:
-        # callbackUrl이 없는 환경이면 콜백 방식이 작동 안 함
-        return JSONResponse(kakao_simple_text(
-            "callbackUrl이 없어 콜백 방식으로 응답할 수 없어요.\n"
-            "오픈빌더 설정(콜백 지원) 상태를 확인해주세요."
-        ))
 
     # 이미지 URL 추출
     detail = body.get("action", {}).get("detailParams", {})
@@ -164,13 +160,18 @@ async def kakao_skill(req: Request):
     if not image_url:
         return JSONResponse(kakao_simple_text("사진이 안 들어왔어요.\n가정통신문 사진을 1장 보내주세요 🙂"))
 
-    # ✅ 1차 즉시 응답 (타임아웃 방지)
-    # 이 응답은 5초 안에 돌아가야 함
+    # ✅ 콜백이 없다면: 일단 즉시 응답만(디버그용)
+    # (콜백이 진짜 켜지면 여기로 오지 않아야 정상)
+    if not callback_url:
+        return JSONResponse(kakao_simple_text(
+            "callbackUrl이 아직 내려오지 않았어요.\n"
+            "오픈빌더에서 '콜백 설정'을 '가정통신문 요약' 블록에 켠 뒤 저장+운영배포까지 해주세요."
+        ))
+
+    # ✅ 1차 즉시 응답(5초 내) — 타임아웃 방지
     immediate = "사진 확인했어요 🙂\n요약 중입니다... (10~20초 정도 걸릴 수 있어요)"
 
-    # ✅ 백그라운드처럼 콜백 수행
-    # FastAPI의 BackgroundTasks를 써도 되지만, Render 환경에서 간단히 asyncio로 실행
-    import asyncio
+    # ✅ 백그라운드처럼 요약 후 콜백 전송
     asyncio.create_task(run_summary_and_callback(image_url, callback_url))
 
     return JSONResponse(kakao_simple_text(immediate))
