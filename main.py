@@ -9,6 +9,11 @@ from fastapi.responses import JSONResponse
 from openai import OpenAI
 
 app = FastAPI()
+
+@app.get("/")
+async def health():
+    return {"status": "ok"}
+
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 # =========================
@@ -53,7 +58,7 @@ FREE_LIMIT_MSG = (
 
 TODAY_CLOSED_MSG = (
     "현재 무료 제공 단계에서 오늘 사용 가능한 AI 처리량을 모두 사용했어요.\n\n"
-    "📅 내일 다시 시도해주시면 정상적으로 이용하실 수 있어요.\n"
+    "내일 다시 시도해주시면 정상적으로 이용하실 수 있어요.\n"
     "불편을 드려 죄송해요 🙏"
 )
 
