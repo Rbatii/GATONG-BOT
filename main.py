@@ -134,11 +134,9 @@ async def run_summary_and_callback(image_url: str, callback_url: str, callback_t
 
     except Exception as e:
         err = repr(e)
-        print("❌ async summary error:", err)
-        await post_callback(
-            callback_url,
-            callback_token,
-            "요약 중 오류가 발생했어요. 사진을 다시 보내주시거나 잠시 후 다시 시도해주세요."
+    print("❌ openai error:", err)
+    return JSONResponse(
+        kakao_simple_text("요약 오류: " + err[:150])
         )
 
 
