@@ -1,6 +1,5 @@
 import os
 import re
-import base64
 import asyncio
 import httpx
 from fastapi import FastAPI, Request
@@ -55,21 +54,6 @@ def extract_first_url(value) -> str | None:
     m = re.search(r"https?://[^\s)]+", s)
     return m.group(0) if m else None
 
-async def download_image_bytes(url: str) -> bytes:
-    # 1분 제한 때문에 다운로드는 빠르게 (최대 10초)
-    timeout = httpx.Timeout(10.0)
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
-        r = await c.get(url)
-        r.raise_for_status()
-        return r.content
-
-def guess_mime(image_bytes: bytes) -> str:
-    if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if image_bytes.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    return "image/jpeg"
-
 async def post_callback(callback_url: str, callback_token: str | None, text: str) -> None:
     payload = kakao_simple_text(text)
     headers = {}
@@ -83,80 +67,81 @@ async def post_callback(callback_url: str, callback_token: str | None, text: str
         if r.status_code >= 400:
             print("📮 callback body:", r.text[:500])
 
-async def summarize(image_url: str) -> str:
-    image_bytes = await download_image_bytes(image_url)
-    mime = guess_mime(image_bytes)
-    data_url = f"data:{mime};base64," + base64.b64encode(image_bytes).decode("utf-8")
-
-    # OpenAI도 1분 제한 때문에 최대 40초로 제한
-    resp = await asyncio.to_thread(
-        lambda: client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{
+def openai_summarize_with_image_url(image_url: str) -> str:
+    # ✅ 이미지 URL을 OpenAI에 그대로 전달 (다운로드/base64 없음)
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {
                 "role": "user",
                 "content": [
                     {"type": "text", "text": PROMPT},
-                    {"type": "image_url", "image_url": {"url": data_url}},
+                    {"type": "image_url", "image_url": {"url": image_url}},
                 ],
-            }],
-        )
+            }
+        ],
     )
     out = (resp.choices[0].message.content or "").strip()
     return out if out else "요약 결과가 비어있어요. 사진을 더 선명하게 다시 보내주세요."
 
 async def run_with_deadline(image_url: str, callback_url: str, callback_token: str | None) -> None:
     """
-    콜백 URL(1분/1회) 만료 전에 무조건 한 번은 보내기.
-    - 55초 안에 요약 끝나면 요약 전송
-    - 55초 넘기면 '지연 안내' 전송 (요약은 취소)
+    callbackUrl은 1분/1회.
+    - 55초 안에 요약되면 결과 전송
+    - 55초 넘으면 안내 메시지 전송(무응답 방지)
     """
     try:
-        # 전체 작업을 55초로 제한
-        summary = await asyncio.wait_for(summarize(image_url), timeout=55.0)
+        summary = await asyncio.wait_for(
+            asyncio.to_thread(lambda: openai_summarize_with_image_url(image_url)),
+            timeout=55.0
+        )
         await post_callback(callback_url, callback_token, summary)
+
     except asyncio.TimeoutError:
         await post_callback(
             callback_url,
             callback_token,
-            "요약에 시간이 조금 더 걸리고 있어요.\n"
-            "사진을 한 번만 더 보내주시면 바로 이어서 처리할게요 🙂"
+            "요약에 시간이 조금 더 걸리고 있어요.\n사진을 한 번만 더 보내주시면 바로 이어서 처리할게요."
         )
+
     except Exception as e:
-        print("❌ async summary error:", repr(e))
+        err = repr(e)
+        print("❌ openai error:", err)
+        # ✅ 사용자에게 원인 힌트를 아주 짧게(민감정보 없이)
         await post_callback(
             callback_url,
             callback_token,
-            "요약 중 오류가 발생했어요. 사진을 다시 보내주시거나 잠시 후 다시 시도해주세요."
+            "요약 오류가 발생했어요.\n사진을 다시 보내주시거나 잠시 후 다시 시도해주세요."
         )
 
 @app.get("/")
 async def health():
-    return {"status": "alive", "version": "v8-deadline"}
+    return {"status": "alive", "version": "v9-image-url"}
 
 @app.post("/kakao-skill")
 async def kakao_skill(req: Request):
     body = await req.json()
-    print("🔥 KAKAO REQUEST RECEIVED (v8)")
+    print("🔥 KAKAO REQUEST RECEIVED (v9)")
 
     user_request = body.get("userRequest", {})
     callback_url = user_request.get("callbackUrl")
     callback_token = req.headers.get("x-kakao-callback-token")
-    print("callbackUrl=", callback_url)
-    print("callbackTokenPresent=", bool(callback_token))
 
     detail = body.get("action", {}).get("detailParams", {})
     secureimage_raw = detail.get("secureimage", {}).get("value", {})
     image_url = extract_first_url(secureimage_raw)
+
+    print("callbackUrl=", callback_url)
+    print("callbackTokenPresent=", bool(callback_token))
 
     if not image_url:
         return JSONResponse(kakao_simple_text("사진이 안 들어왔어요.\n가정통신문 사진을 1장 보내주세요."))
 
     if not callback_url:
         return JSONResponse(kakao_simple_text(
-            "callbackUrl이 요청에 포함되지 않았어요.\n"
-            "오픈빌더에서 콜백 설정이 '가정통신문 요약' 블록에 적용됐는지 확인 후 운영 배포해주세요."
+            "callbackUrl이 요청에 포함되지 않았어요.\n오픈빌더에서 콜백 설정이 해당 블록에 적용됐는지 확인 후 운영 배포해주세요."
         ))
 
-    # 콜백 모드 진입 (5초 제한 회피)
+    # 콜백 모드: 즉시 useCallback 반환
     asyncio.create_task(run_with_deadline(image_url, callback_url, callback_token))
     return JSONResponse(kakao_use_callback())
