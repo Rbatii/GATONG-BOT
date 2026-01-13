@@ -203,6 +203,9 @@ async def run_and_callback(image_url: str, callback_url: str, callback_token: st
                 if "rate_limit" in err.lower() or "429" in err:
                     wait_sec = _parse_wait_seconds_from_error(err) or 60
 
+ 		    # ✅ 추가 로그
+    		    print(f"⏳ OpenAI rate limit. Remaining wait ≈ {wait_sec//3600}h {(wait_sec%3600)//60}m {wait_sec%60}s")
+
                     # 1시간 이상이면 "오늘은 종료"로 처리 (추가 호출 방지)
                     if wait_sec >= 3600:
                         _cooldown_until = time.time() + wait_sec
