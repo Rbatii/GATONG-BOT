@@ -4,7 +4,7 @@ import time
 import base64
 import asyncio
 import httpx
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response, BackgroundTasks
 from fastapi.responses import JSONResponse
 from openai import OpenAI
 
@@ -90,9 +90,9 @@ async def post_callback(callback_url: str, callback_token: str | None, text: str
     timeout = httpx.Timeout(15.0)
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
         r = await c.post(callback_url, json=payload, headers=headers)
-        print("📮 callback status:", r.status_code)
+        print("📮 callback status:", r.status_code, flush=True)
         if r.status_code >= 400:
-            print("📮 callback body:", r.text[:500])
+            print("📮 callback body:", r.text[:500], flush=True)
 
 
 async def download_image_bytes(url: str) -> bytes:
@@ -149,9 +149,12 @@ def _parse_wait_seconds_from_error(err_text: str) -> int | None:
 async def run_and_callback(image_url: str, callback_url: str, callback_token: str | None) -> None:
     global _last_openai_call_time, _cooldown_until
 
+    # ✅ 백그라운드가 진짜 돌기 시작했는지 확인용
+    print("🚀 run_and_callback START", flush=True)
+
     try:
         img = await download_image_bytes(image_url)
-        print("🖼️ downloaded bytes:", len(img))
+        print("🖼️ downloaded bytes:", len(img), flush=True)
 
         if len(img) > 2_500_000:
             await post_callback(
@@ -166,11 +169,13 @@ async def run_and_callback(image_url: str, callback_url: str, callback_token: st
             now = time.time()
 
             if now < _cooldown_until:
+                print("⛔ cooldown active, skip openai", flush=True)
                 await post_callback(callback_url, callback_token, TODAY_CLOSED_MESSAGE)
                 return
 
             wait = RATE_LIMIT_MIN_INTERVAL_SEC - (now - _last_openai_call_time)
             if wait > 0:
+                print(f"⏸️ local pacing active: wait≈{int(wait)}s", flush=True)
                 await post_callback(callback_url, callback_token, FREE_STAGE_LIMIT_MESSAGE)
                 return
 
@@ -186,14 +191,14 @@ async def run_and_callback(image_url: str, callback_url: str, callback_token: st
 
             except Exception as e:
                 err = repr(e)
-                print("❌ openai error:", err)
+                print("❌ openai error:", err, flush=True)
 
                 if "rate_limit" in err.lower() or "429" in err:
                     wait_sec = _parse_wait_seconds_from_error(err) or 60
                     h = wait_sec // 3600
                     m = (wait_sec % 3600) // 60
                     s = wait_sec % 60
-                    print(f"⏳ OpenAI rate limit. Remaining wait ≈ {h}h {m}m {s}s")
+                    print(f"⏳ OpenAI rate limit. Remaining wait ≈ {h}h {m}m {s}s", flush=True)
 
                     if wait_sec >= 3600:
                         _cooldown_until = time.time() + wait_sec
@@ -217,7 +222,7 @@ async def run_and_callback(image_url: str, callback_url: str, callback_token: st
             "요약에 시간이 조금 더 걸리고 있어요.\n사진을 한 번만 더 보내주시면 바로 이어서 처리할게요."
         )
     except Exception as e:
-        print("❌ final error:", repr(e))
+        print("❌ final error:", repr(e), flush=True)
         await post_callback(
             callback_url,
             callback_token,
@@ -236,9 +241,9 @@ async def head_health():
 
 
 @app.post("/kakao-skill")
-async def kakao_skill(req: Request):
+async def kakao_skill(req: Request, background_tasks: BackgroundTasks):
     body = await req.json()
-    print("🔥 KAKAO REQUEST RECEIVED (stable)")
+    print("🔥 KAKAO REQUEST RECEIVED (stable)", flush=True)
 
     user_request = body.get("userRequest", {})
     callback_url = user_request.get("callbackUrl")
@@ -257,5 +262,7 @@ async def kakao_skill(req: Request):
             "오픈빌더에서 콜백 설정이 해당 블록에 적용됐는지 확인 후 운영 배포해주세요."
         ))
 
-    asyncio.create_task(run_and_callback(image_url, callback_url, callback_token))
+    # ✅ create_task 대신 BackgroundTasks
+    background_tasks.add_task(run_and_callback, image_url, callback_url, callback_token)
+
     return JSONResponse(kakao_use_callback())
