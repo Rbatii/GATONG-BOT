@@ -169,7 +169,11 @@ async def run_and_callback(image_url: str, callback_url: str, callback_token: st
             now = time.time()
 
             if now < _cooldown_until:
-                print("⛔ cooldown active, skip openai", flush=True)
+                remaining = int(_cooldown_until - now)
+                h = remaining // 3600
+                m = (remaining % 3600) // 60
+                s = remaining % 60
+                print(f"⛔ cooldown active. Remaining ≈ {h}h {m}m {s}s (skip openai)", flush=True)
                 await post_callback(callback_url, callback_token, TODAY_CLOSED_MESSAGE)
                 return
 
